@@ -21,6 +21,7 @@ const lastSent = new Map(); // jid -> timestamp, cegah spam dobel
 let pairingDone = false; // pairing code cukup diminta sekali per proses
 let warnedNoPhone = false;
 let reconnectTimer = null;
+let stopped = false;
 
 function getText(m) {
   const msg = m.message;
@@ -75,6 +76,51 @@ async function handle(m, sock) {
   console.log(`[${jid}] absen terkirim (no ${MY_NO} = ${MY_NAME}).`);
 }
 
+// Tunggu socket online (atau timeout) sebelum minta pairing code.
+// requestPairingCode saat koneksi belum siap = "Connection Closed".
+async function waitForOpen(sock, timeoutMs = 30000) {
+  if (sock.user) return true;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      sock.ev.off('connection.update', onUpdate);
+      resolve(false);
+    }, timeoutMs);
+    const onUpdate = ({ connection }) => {
+      if (connection === 'open') {
+        clearTimeout(timer);
+        sock.ev.off('connection.update', onUpdate);
+        resolve(true);
+      }
+    };
+    sock.ev.on('connection.update', onUpdate);
+  });
+}
+
+async function requestPairing(sock) {
+  if (pairingDone) return;
+  if (!PHONE) {
+    if (!warnedNoPhone) {
+      warnedNoPhone = true;
+      console.error('Belum pairing. Isi PHONE_NUMBER=628xx di env, deploy ulang, kode 8 digit muncul di log.');
+    }
+    return;
+  }
+  pairingDone = true;
+  const online = await waitForOpen(sock);
+  if (!online || stopped) {
+    pairingDone = false;
+    console.error('Socket belum online, pairing code dibatalkan. Tunggu reconnect...');
+    return;
+  }
+  try {
+    const code = await sock.requestPairingCode(PHONE);
+    console.log(`Pairing code buat ${PHONE}: ${code} (input di WA > Perangkat Tertaut > Tautkan dgn nomor telepon, berlaku +-60 detik)`);
+  } catch (e) {
+    pairingDone = false;
+    console.error('Gagal minta pairing code:', e.message, '(redeploy sekali buat coba lagi setelah socket online)');
+  }
+}
+
 async function start() {
   if (!process.env.GEMINI_API_KEY) {
     console.error('GEMINI_API_KEY kosong. Isi file .env dulu (lihat .env.example).');
@@ -87,25 +133,13 @@ async function start() {
     auth: state,
     logger: pino({ level: 'silent' }),
     browser: ['WA Auto Absen', 'Chrome', '1.0'],
+    connectTimeoutMs: 60000,
+    keepAliveIntervalMs: 15000,
   });
 
-  // Railway: tanpa layar, scan QR mustahil. Pairing code cukup diminta sekali.
-  if (!sock.authState.creds.registered && !pairingDone) {
-    if (!PHONE) {
-      if (!warnedNoPhone) {
-        warnedNoPhone = true;
-        console.error('Belum pairing. Isi PHONE_NUMBER=628xx di env, deploy ulang, kode 8 digit muncul di log.');
-      }
-    } else {
-      pairingDone = true;
-      try {
-        const code = await sock.requestPairingCode(PHONE);
-        console.log(`Pairing code buat ${PHONE}: ${code} (input di WA > Perangkat Tertaut > Tautkan dgn nomor telepon, berlaku +-60 detik)`);
-      } catch (e) {
-        pairingDone = false;
-        console.error('Gagal minta pairing code:', e.message);
-      }
-    }
+  // Railway: tanpa layar, scan QR mustahil. Pairing code solusinya.
+  if (!sock.authState.creds.registered) {
+    requestPairing(sock); // async, tidak blokir event handler
   }
 
   sock.ev.on('creds.update', saveCreds);
@@ -121,14 +155,15 @@ async function start() {
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
       if (code === DisconnectReason.loggedOut) {
-        console.log('Logged out. Hapus isi folder auth_info (atau Volume) lalu pairing ulang.');
+        console.log('Logged out (401). Sesi di Volume basi/kesambung di tempat lain. Hapus isi Volume auth_info lalu redeploy buat pairing ulang.');
+        stopped = true;
         return;
       }
-      // Reconnect dijeda + reset flag biar tidak spam pairing code.
+      // Jangan reconnect saat pairing masih menggantung: biarkan percobaan pairing selesai.
+      if (!sock.authState.creds.registered && pairingDone) return;
       clearTimeout(reconnectTimer);
-      pairingDone = !!sock.authState.creds.registered;
       console.log('Koneksi putus, reconnect 10 detik...');
-      reconnectTimer = setTimeout(start, 10000);
+      reconnectTimer = setTimeout(() => { if (!stopped) start(); }, 10000);
     }
   });
 
