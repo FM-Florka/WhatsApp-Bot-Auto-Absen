@@ -114,7 +114,7 @@ async function start() {
     keepAliveIntervalMs: 15000,
   });
 
-  // Railway: tanpa layar, scan QR mustahil. Pairing code solusinya.
+  // Tanpa layar (panel): QR susah discan, pairing code solusinya.
   if (!sock.authState.creds.registered) {
     requestPairing(sock); // async, tidak blokir event handler
   }
