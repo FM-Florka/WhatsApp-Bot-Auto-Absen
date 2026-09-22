@@ -14,9 +14,13 @@ const MY_NAME = process.env.MY_NAME || 'Muhammad Nabil';
 const MY_NO = parseInt(process.env.MY_ABSEN_NO || '19', 10);
 const DRY_RUN = process.env.DRY_RUN === 'true';
 const COOLDOWN_MS = (parseInt(process.env.COOLDOWN_MIN || '30', 10) || 30) * 60 * 1000;
-const lastSent = new Map(); // jid -> timestamp, cegah spam dobel
 const AUTH_DIR = process.env.AUTH_DIR || 'auth_info';
 const PHONE = (process.env.PHONE_NUMBER || '').replace(/\D/g, ''); // 628xx, tanpa +
+const lastSent = new Map(); // jid -> timestamp, cegah spam dobel
+
+let pairingDone = false; // pairing code cukup diminta sekali per proses
+let warnedNoPhone = false;
+let reconnectTimer = null;
 
 function getText(m) {
   const msg = m.message;
@@ -85,13 +89,22 @@ async function start() {
     browser: ['WA Auto Absen', 'Chrome', '1.0'],
   });
 
-  // Railway: tanpa layar, scan QR mustahil. Pairing code solusinya.
-  if (!sock.authState.creds.registered) {
+  // Railway: tanpa layar, scan QR mustahil. Pairing code cukup diminta sekali.
+  if (!sock.authState.creds.registered && !pairingDone) {
     if (!PHONE) {
-      console.error('Belum pairing. Isi PHONE_NUMBER=628xx di env, deploy ulang, kode 8 digit muncul di log.');
+      if (!warnedNoPhone) {
+        warnedNoPhone = true;
+        console.error('Belum pairing. Isi PHONE_NUMBER=628xx di env, deploy ulang, kode 8 digit muncul di log.');
+      }
     } else {
-      const code = await sock.requestPairingCode(PHONE);
-      console.log(`Pairing code buat ${PHONE}: ${code} (input di WA > Perangkat Tertaut > Tautkan dgn nomor telepon)`);
+      pairingDone = true;
+      try {
+        const code = await sock.requestPairingCode(PHONE);
+        console.log(`Pairing code buat ${PHONE}: ${code} (input di WA > Perangkat Tertaut > Tautkan dgn nomor telepon, berlaku +-60 detik)`);
+      } catch (e) {
+        pairingDone = false;
+        console.error('Gagal minta pairing code:', e.message);
+      }
     }
   }
 
@@ -101,15 +114,21 @@ async function start() {
       console.log('Scan QR ini pakai WA kamu:');
       qrcode.generate(qr, { small: true });
     }
-    if (connection === 'open') console.log(`Bot connect. Siap absen no ${MY_NO} = ${MY_NAME}.`);
+    if (connection === 'open') {
+      pairingDone = true;
+      console.log(`Bot connect. Siap absen no ${MY_NO} = ${MY_NAME}.`);
+    }
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
-      if (code !== DisconnectReason.loggedOut) {
-        console.log('Koneksi putus, reconnect...');
-        start();
-      } else {
-        console.log('Logged out. Hapus folder auth_info lalu jalankan ulang untuk scan QR baru.');
+      if (code === DisconnectReason.loggedOut) {
+        console.log('Logged out. Hapus isi folder auth_info (atau Volume) lalu pairing ulang.');
+        return;
       }
+      // Reconnect dijeda + reset flag biar tidak spam pairing code.
+      clearTimeout(reconnectTimer);
+      pairingDone = !!sock.authState.creds.registered;
+      console.log('Koneksi putus, reconnect 10 detik...');
+      reconnectTimer = setTimeout(start, 10000);
     }
   });
 
