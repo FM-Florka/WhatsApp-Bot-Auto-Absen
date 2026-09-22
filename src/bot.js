@@ -76,26 +76,9 @@ async function handle(m, sock) {
   console.log(`[${jid}] absen terkirim (no ${MY_NO} = ${MY_NAME}).`);
 }
 
-// Tunggu socket online (atau timeout) sebelum minta pairing code.
-// requestPairingCode saat koneksi belum siap = "Connection Closed".
-async function waitForOpen(sock, timeoutMs = 30000) {
-  if (sock.user) return true;
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      sock.ev.off('connection.update', onUpdate);
-      resolve(false);
-    }, timeoutMs);
-    const onUpdate = ({ connection }) => {
-      if (connection === 'open') {
-        clearTimeout(timer);
-        sock.ev.off('connection.update', onUpdate);
-        resolve(true);
-      }
-    };
-    sock.ev.on('connection.update', onUpdate);
-  });
-}
-
+// Pairing code diminta SEGERA setelah socket dibuat (pola standar Baileys).
+// Menunggu "open" dulu justru bikin gagal: socket pairing tidak pernah open
+// sebelum pairing selesai. QR tetap dicetak sebagai alternatif.
 async function requestPairing(sock) {
   if (pairingDone) return;
   if (!PHONE) {
@@ -106,18 +89,12 @@ async function requestPairing(sock) {
     return;
   }
   pairingDone = true;
-  const online = await waitForOpen(sock);
-  if (!online || stopped) {
-    pairingDone = false;
-    console.error('Socket belum online, pairing code dibatalkan. Tunggu reconnect...');
-    return;
-  }
   try {
     const code = await sock.requestPairingCode(PHONE);
     console.log(`Pairing code buat ${PHONE}: ${code} (input di WA > Perangkat Tertaut > Tautkan dgn nomor telepon, berlaku +-60 detik)`);
   } catch (e) {
     pairingDone = false;
-    console.error('Gagal minta pairing code:', e.message, '(redeploy sekali buat coba lagi setelah socket online)');
+    console.error('Gagal minta pairing code:', e.message, '(coba scan QR di atas, atau jalankan ulang)');
   }
 }
 
